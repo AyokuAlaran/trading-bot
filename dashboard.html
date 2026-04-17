@@ -680,7 +680,7 @@ function renderOpenPositions(trades) {
     wrap.innerHTML = '<div class="empty">No open positions — run <code>python bot.py</code> or <code>python sniper.py</code> to place trades.</div>';
     return;
   }
-  open.sort(function(a,b){ return new Date(b.timestamp) - new Date(a.timestamp); });
+  open.sort(function(a,b){ return new Date(b.created_at) - new Date(a.created_at); });
   var rows = open.map(function(p) {
     var stratBadge = p.strategy === 'sniper'
       ? '<span class="strategy-badge badge-sniper">sniper</span>'
@@ -695,7 +695,7 @@ function renderOpenPositions(trades) {
       + '<td>' + fmtUSD(p.amount) + '</td>'
       + '<td>' + parseFloat(p.entry_price||0).toFixed(3) + '</td>'
       + '<td>' + fmtPct((parseFloat(p.edge||0) * 100)) + '</td>'
-      + '<td>' + fmtDate(p.timestamp) + '</td>'
+      + '<td>' + fmtDate(p.created_at) + '</td>'
       + '</tr>';
   }).join('');
 
@@ -713,7 +713,7 @@ function renderTradeHistory(trades) {
     wrap.innerHTML = '<div class="empty">No trades yet — run <code>python bot.py</code> to start.</div>';
     return;
   }
-  var recent = trades.slice().sort(function(a,b){ return new Date(b.timestamp) - new Date(a.timestamp); }).slice(0, 30);
+  var recent = trades.slice().sort(function(a,b){ return new Date(b.created_at) - new Date(a.created_at); }).slice(0, 30);
   var rows = recent.map(function(t, i) {
     var stratBadge = t.strategy === 'sniper'
       ? '<span class="strategy-badge badge-sniper">sniper</span>'
@@ -739,7 +739,7 @@ function renderTradeHistory(trades) {
       + '<td>' + pnlHtml + '</td>'
       + '<td>' + statusBadge + '</td>'
       + '<td class="td-reasoning">' + esc(shortReason) + '</td>'
-      + '<td style="white-space:nowrap">' + fmtDate(t.timestamp) + '</td>'
+      + '<td style="white-space:nowrap">' + fmtDate(t.created_at) + '</td>'
       + '</tr>';
   }).join('');
 
@@ -756,7 +756,7 @@ async function loadData() {
   try {
     var bankrollRes = await db.from('bankroll').select('*');
     var tradesRes   = await db.from('trades').select('*')
-                       .order('timestamp', { ascending: false })
+                       .order('created_at', { ascending: false })
                        .limit(300);
 
     if (bankrollRes.error) throw bankrollRes.error;

@@ -275,7 +275,7 @@ class SupabaseExecutor:
             "pnl":                        0.0,
             "outcome":                    None,
             "exit_price":                 None,
-            "timestamp":                  _now_iso(),
+            "created_at":                 _now_iso(),
             "exit_timestamp":             None,
         }
 
