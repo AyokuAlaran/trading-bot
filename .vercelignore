@@ -1,0 +1,22 @@
+# Files excluded from Vercel deployment
+# The dashboard only needs dashboard.html and dashboard_data.js.
+# Everything else stays local.
+
+# Python source
+*.py
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets and local config
+.env
+.env.*
+.claude/
+
+# Raw data files (dashboard_data.js is the public-safe export)
+trades.json
+mock_markets.json
+markets_cache.json
+
+# Docs and tooling (not needed at runtime)
+requirements.txt

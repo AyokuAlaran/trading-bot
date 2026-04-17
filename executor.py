@@ -1,0 +1,372 @@
+"""
+executor.py — Supabase-backed Trade Executor
+Shared by both the analytical bot (bot.py) and the sniper bot (sniper.py).
+All state (bankroll, trades) lives in Supabase — no local file writes.
+"""
+
+import os
+import random
+from datetime import datetime, timezone
+from typing import Optional
+
+from dotenv import load_dotenv
+from supabase import create_client, Client
+
+load_dotenv()
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+INITIAL_BANKROLL = 1000.0  # Expected to be pre-seeded in Supabase
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class SupabaseExecutor:
+    """
+    Manages trades and bankroll for one strategy in Supabase.
+
+    Args:
+        strategy:         'analytical' | 'sniper'
+        max_bet_fraction: hard cap per trade (0.05 for analytical, 0.20 for sniper)
+        kelly_fraction:   Kelly multiplier (0.25 for analytical, 0.50 for sniper)
+    """
+
+    MIN_BET_SIZE = 0.50
+
+    def __init__(
+        self,
+        strategy: str,
+        max_bet_fraction: float = 0.05,
+        kelly_fraction: float = 0.25,
+    ):
+        if not SUPABASE_URL or not SUPABASE_KEY:
+            raise RuntimeError(
+                "SUPABASE_URL and SUPABASE_ANON_KEY must be set in .env"
+            )
+        self.strategy         = strategy
+        self.max_bet_fraction = max_bet_fraction
+        self.kelly_fraction   = kelly_fraction
+        self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+    # ── Bankroll ───────────────────────────────────────────────────────────────
+
+    def get_bankroll(self) -> float:
+        """Fetch current balance from Supabase; seeds $1 000 row if missing."""
+        try:
+            res = (
+                self.supabase.table("bankroll")
+                .select("balance")
+                .eq("strategy", self.strategy)
+                .execute()
+            )
+            if res.data:
+                return float(res.data[0]["balance"])
+        except Exception as e:
+            print(f"  WARNING: Could not read bankroll — {e}. Using {INITIAL_BANKROLL}.")
+            return INITIAL_BANKROLL
+
+        # Seed a fresh row if not pre-existing
+        try:
+            self.supabase.table("bankroll").insert({
+                "strategy":        self.strategy,
+                "balance":         INITIAL_BANKROLL,
+                "initial_balance": INITIAL_BANKROLL,
+                "updated_at":      _now_iso(),
+            }).execute()
+        except Exception as e:
+            print(f"  WARNING: Could not seed bankroll row — {e}")
+        return INITIAL_BANKROLL
+
+    def get_initial_bankroll(self) -> float:
+        try:
+            res = (
+                self.supabase.table("bankroll")
+                .select("initial_balance")
+                .eq("strategy", self.strategy)
+                .execute()
+            )
+            if res.data:
+                return float(res.data[0]["initial_balance"])
+        except Exception:
+            pass
+        return INITIAL_BANKROLL
+
+    def _set_bankroll(self, new_balance: float):
+        try:
+            self.supabase.table("bankroll").update({
+                "balance":    round(new_balance, 2),
+                "updated_at": _now_iso(),
+            }).eq("strategy", self.strategy).execute()
+        except Exception as e:
+            print(f"  WARNING: Could not update bankroll — {e}")
+
+    # ── Trade execution ────────────────────────────────────────────────────────
+
+    def execute_trade(
+        self,
+        opportunity: dict,
+        source: str = "claude",
+    ) -> Optional[dict]:
+        """
+        Record a new trade in Supabase and deduct the bet from the bankroll.
+
+        Args:
+            opportunity: analysis dict (market_id, question, recommendation, edge,
+                         confidence, estimated_true_probability, current_price,
+                         suggested_bet_fraction, reasoning)
+            source:      'claude' for analytical, 'sniper' for live-result bets
+        Returns:
+            Inserted trade dict (with 'id' from Supabase), or None if skipped.
+        """
+        recommendation = opportunity.get("recommendation", "SKIP")
+        if recommendation not in ("YES", "NO"):
+            return None
+
+        bankroll = self.get_bankroll()
+        if bankroll <= 0:
+            print(f"  [{self.strategy}] Bankroll ${bankroll:.2f} — no funds.")
+            return None
+
+        # ── Bet sizing ────────────────────────────────────────────────────────
+        edge       = float(opportunity.get("edge", 0.0))
+        confidence = float(opportunity.get("confidence", 1.0))
+        raw_frac   = edge * confidence * self.kelly_fraction
+        bet_frac   = min(max(raw_frac, 0.005), self.max_bet_fraction)
+        bet_size   = round(bankroll * bet_frac, 2)
+
+        if bet_size < self.MIN_BET_SIZE:
+            print(f"  [{self.strategy}] Bet ${bet_size:.2f} below minimum — skipped")
+            return None
+
+        # ── Duplicate guard ───────────────────────────────────────────────────
+        market_id = str(opportunity.get("market_id", ""))
+        try:
+            dup = (
+                self.supabase.table("trades")
+                .select("id")
+                .eq("strategy", self.strategy)
+                .eq("market_id", market_id)
+                .eq("status", "open")
+                .execute()
+            )
+            if dup.data:
+                print(f"  [{self.strategy}] Already open in {market_id} — skipped")
+                return None
+        except Exception:
+            pass
+
+        # ── Entry price ───────────────────────────────────────────────────────
+        yes_price = float(
+            opportunity.get("current_price",
+            opportunity.get("current_market_price", 0.5))
+        )
+        yes_price   = max(0.001, min(0.999, yes_price))
+        entry_price = yes_price if recommendation == "YES" else (1.0 - yes_price)
+
+        trade_row = {
+            "strategy":                   self.strategy,
+            "source":                     source,
+            "market_id":                  market_id,
+            "question":                   str(opportunity.get("question", "")),
+            "recommendation":             recommendation,
+            "amount":                     bet_size,
+            "entry_price":                round(entry_price, 6),
+            "estimated_true_probability": float(opportunity.get("estimated_true_probability", 0.5)),
+            "edge":                       round(edge, 6),
+            "confidence":                 round(confidence, 6),
+            "reasoning":                  str(opportunity.get("reasoning", "")),
+            "status":                     "open",
+            "pnl":                        0.0,
+            "outcome":                    None,
+            "exit_price":                 None,
+            "timestamp":                  _now_iso(),
+            "exit_timestamp":             None,
+        }
+
+        try:
+            res = self.supabase.table("trades").insert(trade_row).execute()
+            if res.data:
+                trade_row["id"] = res.data[0]["id"]
+        except Exception as e:
+            print(f"  [{self.strategy}] ERROR inserting trade: {e}")
+            return None
+
+        self._set_bankroll(bankroll - bet_size)
+
+        q = trade_row["question"]
+        print(f"\n  [{self.strategy.upper()}] {recommendation} "
+              f"'{q[:60]}{'...' if len(q)>60 else ''}'")
+        print(f"    Bet: ${bet_size:.2f}  Entry: {entry_price:.3f}  "
+              f"Edge: {edge:.1%}  Conf: {confidence:.0%}  Source: {source}")
+        return trade_row
+
+    # ── Analytical resolution (probabilistic) ──────────────────────────────────
+
+    def simulate_resolutions(self):
+        """
+        Randomly resolve a subset of open analytical trades using Claude's
+        estimated true probability. Mirrors realistic market settlement rates.
+        """
+        try:
+            res = (
+                self.supabase.table("trades")
+                .select("*")
+                .eq("strategy", self.strategy)
+                .eq("status", "open")
+                .execute()
+            )
+            open_trades = res.data or []
+        except Exception as e:
+            print(f"  WARNING: Could not fetch open positions: {e}")
+            return
+
+        if not open_trades:
+            print("  No open positions to resolve.")
+            return
+
+        candidates = [t for t in open_trades if random.random() < 0.40]
+        if not candidates:
+            print(f"  No positions resolved this run ({len(open_trades)} still open).")
+            return
+
+        print(f"\nResolving {len(candidates)} position(s):")
+        bankroll = self.get_bankroll()
+        for trade in candidates:
+            bankroll = self._close_trade_probabilistic(trade, bankroll)
+        self._set_bankroll(bankroll)
+
+    def _close_trade_probabilistic(self, trade: dict, bankroll: float) -> float:
+        """Probabilistically settle one open trade. Returns updated bankroll."""
+        true_prob   = float(trade.get("estimated_true_probability", 0.5))
+        entry_price = float(trade.get("entry_price", 0.5))
+        amount      = float(trade.get("amount", 0))
+        rec         = trade.get("recommendation", "YES")
+
+        resolved_yes = random.random() < true_prob
+        bet_wins = (rec == "YES" and resolved_yes) or (rec == "NO" and not resolved_yes)
+
+        if bet_wins:
+            payout     = round(amount / max(entry_price, 0.001), 4)
+            pnl        = round(payout - amount, 4)
+            exit_price = 1.0
+            outcome    = "WIN"
+            bankroll   = round(bankroll + payout, 2)
+        else:
+            pnl        = round(-amount, 4)
+            exit_price = 0.0
+            outcome    = "LOSS"
+
+        try:
+            self.supabase.table("trades").update({
+                "status":         "closed",
+                "pnl":            pnl,
+                "outcome":        outcome,
+                "exit_price":     exit_price,
+                "exit_timestamp": _now_iso(),
+            }).eq("id", trade["id"]).execute()
+        except Exception as e:
+            print(f"  WARNING: Could not close trade {trade['id']}: {e}")
+
+        tag = "[WIN] " if outcome == "WIN" else "[LOSS]"
+        q   = trade.get("question", "")
+        print(f"  {tag} {outcome}: '{q[:50]}{'...' if len(q)>50 else ''}'  "
+              f"P&L=${pnl:+.2f}  Bankroll→${bankroll:.2f}")
+        return bankroll
+
+    # ── Sniper settlement (known outcome) ─────────────────────────────────────
+
+    def settle_sniper_trade(
+        self,
+        trade_id: str,
+        outcome: str,
+        entry_price: float,
+        amount: float,
+    ):
+        """
+        Immediately settle a sniper trade with the confirmed real-world outcome.
+        Called right after execute_trade() when the live result is known.
+        """
+        if outcome == "WIN":
+            payout     = round(amount / max(entry_price, 0.001), 4)
+            pnl        = round(payout - amount, 4)
+            exit_price = 1.0
+        else:
+            payout     = 0.0
+            pnl        = round(-amount, 4)
+            exit_price = 0.0
+
+        try:
+            self.supabase.table("trades").update({
+                "status":         "closed",
+                "pnl":            pnl,
+                "outcome":        outcome,
+                "exit_price":     exit_price,
+                "exit_timestamp": _now_iso(),
+            }).eq("id", trade_id).execute()
+        except Exception as e:
+            print(f"  WARNING: Could not settle sniper trade {trade_id}: {e}")
+            return
+
+        new_bankroll = self.get_bankroll() + payout
+        self._set_bankroll(new_bankroll)
+        print(f"  [SNIPER SETTLED] {outcome}: P&L=${pnl:+.2f}  "
+              f"Bankroll→${new_bankroll:.2f}")
+
+    # ── Stats ──────────────────────────────────────────────────────────────────
+
+    def get_stats(self) -> dict:
+        try:
+            res    = (
+                self.supabase.table("trades")
+                .select("*")
+                .eq("strategy", self.strategy)
+                .execute()
+            )
+            trades = res.data or []
+        except Exception:
+            trades = []
+
+        closed  = [t for t in trades if t.get("status") == "closed"]
+        wins    = [t for t in closed if t.get("outcome") == "WIN"]
+        losses  = [t for t in closed if t.get("outcome") == "LOSS"]
+        open_   = [t for t in trades if t.get("status") == "open"]
+
+        bankroll         = self.get_bankroll()
+        initial_bankroll = self.get_initial_bankroll()
+        total_pnl        = sum(float(t.get("pnl") or 0) for t in closed)
+        win_rate         = (len(wins) / len(closed) * 100) if closed else 0.0
+        avg_win          = (sum(float(t.get("pnl") or 0) for t in wins)   / len(wins))   if wins   else 0.0
+        avg_loss         = (sum(float(t.get("pnl") or 0) for t in losses) / len(losses)) if losses else 0.0
+        in_play          = sum(float(t.get("amount") or 0) for t in open_)
+        roi              = ((bankroll - initial_bankroll) / initial_bankroll * 100) if initial_bankroll > 0 else 0.0
+
+        return {
+            "strategy":         self.strategy,
+            "bankroll":         round(bankroll, 2),
+            "initial_bankroll": initial_bankroll,
+            "total_pnl":        round(total_pnl, 2),
+            "roi":              round(roi, 2),
+            "total_trades":     len(trades),
+            "closed_trades":    len(closed),
+            "open_trades":      len(open_),
+            "wins":             len(wins),
+            "losses":           len(losses),
+            "win_rate":         round(win_rate, 1),
+            "avg_win":          round(avg_win, 2),
+            "avg_loss":         round(avg_loss, 2),
+            "amount_in_play":   round(in_play, 2),
+        }
+
+    def print_stats(self):
+        s = self.get_stats()
+        print(f"\n{'='*60}")
+        print(f"  [{s['strategy'].upper()}] SESSION COMPLETE")
+        print(f"{'='*60}")
+        print(f"  Bankroll      : ${s['bankroll']:.2f}")
+        print(f"  Total P&L     : ${s['total_pnl']:+.2f}  (ROI {s['roi']:+.1f}%)")
+        print(f"  Win Rate      : {s['win_rate']:.1f}%  ({s['wins']}W / {s['losses']}L)")
+        print(f"  Open Positions: {s['open_trades']}")
+        print(f"  In Play       : ${s['amount_in_play']:.2f}")
+        print(f"{'='*60}")

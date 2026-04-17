@@ -1,0 +1,14 @@
+# Polymarket Trading Bot — Python Dependencies
+# Install with:  pip install -r requirements.txt
+
+# Anthropic Python SDK — Claude API (analytical bot)
+anthropic>=0.40.0
+
+# Supabase Python client — all state storage (replaces trades.json)
+supabase>=2.0.0
+
+# HTTP client — Polymarket Gamma API + PandaScore + API-Football
+requests>=2.31.0
+
+# Environment variable loading from .env
+python-dotenv>=1.0.0

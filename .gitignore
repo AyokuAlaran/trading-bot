@@ -1,0 +1,28 @@
+# Secrets — never commit
+.env
+
+# Generated local data files (state now lives in Supabase)
+trades.json
+dashboard_data.js
+markets_cache.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

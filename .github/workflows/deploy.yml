@@ -1,0 +1,25 @@
+name: Deploy Dashboard to Vercel
+
+on:
+  push:
+    branches: [main]
+
+# Required GitHub Actions secrets (add at: repo → Settings → Secrets → Actions):
+#   VERCEL_TOKEN      — from https://vercel.com/account/tokens
+#   VERCEL_ORG_ID     — from .vercel/project.json after running `vercel link`
+#   VERCEL_PROJECT_ID — from .vercel/project.json after running `vercel link`
+
+jobs:
+  deploy:
+    name: Deploy to Vercel
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to Vercel
+        run: npx vercel --prod --token ${{ secrets.VERCEL_TOKEN }} --yes
+        env:
+          VERCEL_ORG_ID:     ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}

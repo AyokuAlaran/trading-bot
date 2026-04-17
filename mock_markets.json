@@ -1,0 +1,102 @@
+[
+  {
+    "market_id": "mkt_001",
+    "question": "Will Bitcoin exceed $150,000 by June 30, 2026?",
+    "category": "crypto",
+    "current_yes_price": 0.38,
+    "volume_24h": 125000,
+    "liquidity": 45000,
+    "end_date": "2026-06-30",
+    "description": "Market resolves YES if BTC/USD spot price closes above $150,000 on Coinbase on any day before June 30, 2026."
+  },
+  {
+    "market_id": "mkt_002",
+    "question": "Will the Federal Reserve cut interest rates at the May 2026 FOMC meeting?",
+    "category": "macro",
+    "current_yes_price": 0.44,
+    "volume_24h": 87500,
+    "liquidity": 32000,
+    "end_date": "2026-05-07",
+    "description": "Resolves YES if the Fed announces a rate cut of at least 25bps at the May 6-7 FOMC meeting."
+  },
+  {
+    "market_id": "mkt_003",
+    "question": "Will the S&P 500 close above 7,000 by December 31, 2026?",
+    "category": "stocks",
+    "current_yes_price": 0.52,
+    "volume_24h": 210000,
+    "liquidity": 78000,
+    "end_date": "2026-12-31",
+    "description": "Resolves YES if the S&P 500 index closes at or above 7,000 on any trading day in 2026."
+  },
+  {
+    "market_id": "mkt_004",
+    "question": "Will Ethereum ETF net inflows exceed $1 billion in April 2026?",
+    "category": "crypto",
+    "current_yes_price": 0.29,
+    "volume_24h": 54000,
+    "liquidity": 19000,
+    "end_date": "2026-04-30",
+    "description": "Resolves YES if the total net inflows across all US-listed spot Ethereum ETFs exceed $1B in April 2026."
+  },
+  {
+    "market_id": "mkt_005",
+    "question": "Will Apple announce a consumer AR/VR headset under $1,500 at WWDC 2026?",
+    "category": "tech",
+    "current_yes_price": 0.21,
+    "volume_24h": 43000,
+    "liquidity": 15000,
+    "end_date": "2026-06-15",
+    "description": "Resolves YES if Apple announces a new AR or VR headset with a retail price under $1,500 at WWDC 2026."
+  },
+  {
+    "market_id": "mkt_006",
+    "question": "Will US CPI inflation fall below 2.5% year-over-year by August 2026?",
+    "category": "macro",
+    "current_yes_price": 0.58,
+    "volume_24h": 96000,
+    "liquidity": 38000,
+    "end_date": "2026-08-31",
+    "description": "Resolves YES if the US Bureau of Labor Statistics reports CPI inflation below 2.5% YoY for any month through August 2026."
+  },
+  {
+    "market_id": "mkt_007",
+    "question": "Will OpenAI announce or complete an IPO by end of 2026?",
+    "category": "tech",
+    "current_yes_price": 0.61,
+    "volume_24h": 178000,
+    "liquidity": 65000,
+    "end_date": "2026-12-31",
+    "description": "Resolves YES if OpenAI publicly files for or completes an IPO on a major stock exchange by December 31, 2026."
+  },
+  {
+    "market_id": "mkt_008",
+    "question": "Will there be a US federal government shutdown before June 30, 2026?",
+    "category": "politics",
+    "current_yes_price": 0.18,
+    "volume_24h": 62000,
+    "liquidity": 24000,
+    "end_date": "2026-06-30",
+    "description": "Resolves YES if the US federal government experiences a funding lapse (shutdown) of 24 hours or more before June 30, 2026."
+  },
+  {
+    "market_id": "mkt_009",
+    "question": "Will Solana (SOL) price exceed $500 by July 31, 2026?",
+    "category": "crypto",
+    "current_yes_price": 0.33,
+    "volume_24h": 71000,
+    "liquidity": 28000,
+    "end_date": "2026-07-31",
+    "description": "Resolves YES if SOL/USD spot price closes above $500 on Coinbase on any day before July 31, 2026."
+  },
+  {
+    "market_id": "mkt_010",
+    "question": "Will any AI lab claim to achieve AGI before January 1, 2027?",
+    "category": "ai",
+    "current_yes_price": 0.11,
+    "volume_24h": 134000,
+    "liquidity": 52000,
+    "end_date": "2026-12-31",
+    "description": "Resolves YES if a major AI lab (OpenAI, Google DeepMind, Anthropic, Meta AI, or xAI) publicly claims to have achieved Artificial General Intelligence by end of 2026."
+  }
+]
