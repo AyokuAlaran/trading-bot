@@ -573,10 +573,21 @@ var pnlChartInstance = null;
 
 function renderPnLChart(allTrades) {
   var canvas = document.getElementById('pnlChart');
+  // canvas may have been removed by a prior error render — re-inject it
+  if (!canvas) {
+    var card = document.querySelector('.chart-card');
+    if (!card) return;
+    canvas = document.createElement('canvas');
+    canvas.id = 'pnlChart';
+    card.innerHTML = '';
+    card.appendChild(canvas);
+  }
   if (window._chartFailed || typeof Chart === 'undefined') {
     canvas.parentNode.innerHTML = '<div class="empty">Chart unavailable — Chart.js failed to load.</div>';
     return;
   }
+  var ctx = canvas.getContext('2d');
+  if (!ctx) return;
 
   function buildSeries(trades) {
     var closed = trades
@@ -608,7 +619,7 @@ function renderPnLChart(allTrades) {
   if (pnlChartInstance) { pnlChartInstance.destroy(); pnlChartInstance = null; }
 
   try {
-    pnlChartInstance = new Chart(canvas.getContext('2d'), {
+    pnlChartInstance = new Chart(ctx, {
       type: 'line',
       data: {
         datasets: [

@@ -220,6 +220,7 @@ def main():
         max_bet_fraction=MAX_BET_PCT,
         kelly_fraction=0.50,
     )
+    executor.sync_bankroll_from_polymarket(num_strategies=2)
 
     print(f"\nStarting poll loop. Ctrl+C to stop.\n")
     cycle = 0

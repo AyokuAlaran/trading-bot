@@ -40,7 +40,7 @@ class SupabaseExecutor:
         kelly_fraction:   Kelly multiplier (0.25 for analytical, 0.50 for sniper)
     """
 
-    MIN_BET_SIZE = 0.50
+    MIN_BET_SIZE = 0.01  # lowered to match small real-money bankrolls
 
     def __init__(
         self,
@@ -60,7 +60,7 @@ class SupabaseExecutor:
     # ── Bankroll ───────────────────────────────────────────────────────────────
 
     def get_bankroll(self) -> float:
-        """Fetch current balance from Supabase; seeds $1 000 row if missing."""
+        """Fetch current balance from Supabase; seeds row if missing."""
         try:
             res = (
                 self.supabase.table("bankroll")
@@ -77,28 +77,17 @@ class SupabaseExecutor:
         # Seed a fresh row if not pre-existing
         try:
             self.supabase.table("bankroll").insert({
-                "strategy":        self.strategy,
-                "balance":         INITIAL_BANKROLL,
-                "initial_balance": INITIAL_BANKROLL,
-                "updated_at":      _now_iso(),
+                "strategy":   self.strategy,
+                "balance":    INITIAL_BANKROLL,
+                "updated_at": _now_iso(),
             }).execute()
         except Exception as e:
             print(f"  WARNING: Could not seed bankroll row — {e}")
         return INITIAL_BANKROLL
 
     def get_initial_bankroll(self) -> float:
-        try:
-            res = (
-                self.supabase.table("bankroll")
-                .select("initial_balance")
-                .eq("strategy", self.strategy)
-                .execute()
-            )
-            if res.data:
-                return float(res.data[0]["initial_balance"])
-        except Exception:
-            pass
-        return INITIAL_BANKROLL
+        """Returns current balance as a proxy for initial (initial_balance col may not exist)."""
+        return self.get_bankroll()
 
     def _set_bankroll(self, new_balance: float):
         try:
@@ -108,6 +97,90 @@ class SupabaseExecutor:
             }).eq("strategy", self.strategy).execute()
         except Exception as e:
             print(f"  WARNING: Could not update bankroll — {e}")
+
+    # ── Polymarket balance sync ────────────────────────────────────────────────
+
+    def sync_bankroll_from_polymarket(self, num_strategies: int = 2):
+        """
+        Fetch real USDC balance from Polymarket CLOB and update this strategy's
+        bankroll to (total_balance / num_strategies). Safe to call on startup.
+        """
+        try:
+            clob = self._build_clob_client()
+            if clob is None:
+                print(f"  [sync] No CLOB credentials — skipping balance sync.")
+                return
+            raw = clob.get_balance()
+            # get_balance may return a dict or a numeric string depending on version
+            if isinstance(raw, dict):
+                total = float(raw.get("balance", raw.get("USDC", 0)))
+            else:
+                total = float(raw)
+            share = round(total / num_strategies, 2)
+            self._set_bankroll(share)
+            # Also update initial_balance so ROI is calculated correctly
+            try:
+                self.supabase.table("bankroll").update({
+                    "initial_balance": share,
+                    "updated_at": _now_iso(),
+                }).eq("strategy", self.strategy).execute()
+            except Exception:
+                pass
+            print(f"  [sync] Polymarket USDC ${total:.2f} → {self.strategy}: ${share:.2f}")
+        except AttributeError:
+            print(f"  [sync] get_balance() not available in this py-clob-client version — keeping existing bankroll.")
+        except Exception as e:
+            print(f"  [sync] Could not fetch Polymarket balance ({e}) — keeping existing bankroll.")
+
+    # ── Schema-safe DB helpers ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_bad_column(e: Exception) -> Optional[str]:
+        """Pull the offending column name from a postgrest schema error."""
+        import re
+        # postgrest APIError has a .message attribute with the clean string
+        msg = getattr(e, "message", None) or str(e)
+        for pat in [
+            r"Could not find the '(\w+)' column",
+            r"column '(\w+)' of",
+            r"column (\w+) does not exist",
+            r"'(\w+)' does not exist",
+        ]:
+            m = re.search(pat, msg)
+            if m:
+                return m.group(1)
+        return None
+
+    def _safe_insert(self, table: str, row: dict):
+        """Insert row, auto-stripping any columns the schema doesn't have (up to 12)."""
+        payload = dict(row)
+        for _ in range(12):
+            try:
+                return self.supabase.table(table).insert(payload).execute()
+            except Exception as e:
+                col = self._extract_bad_column(e)
+                if col and col in payload:
+                    payload.pop(col)
+                else:
+                    print(f"  [{self.strategy}] ERROR inserting into {table}: {e}")
+                    return None
+        print(f"  [{self.strategy}] ERROR: too many schema mismatches on {table}")
+        return None
+
+    def _safe_update(self, table: str, data: dict, match_col: str, match_val):
+        """Update row, stripping columns that don't exist in the schema."""
+        payload = dict(data)
+        for _ in range(12):
+            try:
+                self.supabase.table(table).update(payload).eq(match_col, match_val).execute()
+                return
+            except Exception as e:
+                col = self._extract_bad_column(e)
+                if col and col in payload:
+                    payload.pop(col)
+                else:
+                    print(f"  WARNING: Could not update {table}: {e}")
+                    return
 
     # ── CLOB helpers ──────────────────────────────────────────────────────────
 
@@ -279,13 +352,11 @@ class SupabaseExecutor:
             "exit_timestamp":             None,
         }
 
-        try:
-            res = self.supabase.table("trades").insert(trade_row).execute()
-            if res.data:
-                trade_row["id"] = res.data[0]["id"]
-        except Exception as e:
-            print(f"  [{self.strategy}] ERROR inserting trade: {e}")
+        res = self._safe_insert("trades", trade_row)
+        if res is None:
             return None
+        if res.data:
+            trade_row["id"] = res.data[0]["id"]
 
         self._set_bankroll(bankroll - bet_size)
 
@@ -360,16 +431,13 @@ class SupabaseExecutor:
             exit_price = 0.0
             outcome    = "LOSS"
 
-        try:
-            self.supabase.table("trades").update({
-                "status":         "closed",
-                "pnl":            pnl,
-                "outcome":        outcome,
-                "exit_price":     exit_price,
-                "exit_timestamp": _now_iso(),
-            }).eq("id", trade["id"]).execute()
-        except Exception as e:
-            print(f"  WARNING: Could not close trade {trade['id']}: {e}")
+        self._safe_update("trades", {
+            "status":         "closed",
+            "pnl":            pnl,
+            "outcome":        outcome,
+            "exit_price":     exit_price,
+            "exit_timestamp": _now_iso(),
+        }, "id", trade["id"])
 
         tag = "[WIN] " if outcome == "WIN" else "[LOSS]"
         q   = trade.get("question", "")
@@ -399,17 +467,13 @@ class SupabaseExecutor:
             pnl        = round(-amount, 4)
             exit_price = 0.0
 
-        try:
-            self.supabase.table("trades").update({
-                "status":         "closed",
-                "pnl":            pnl,
-                "outcome":        outcome,
-                "exit_price":     exit_price,
-                "exit_timestamp": _now_iso(),
-            }).eq("id", trade_id).execute()
-        except Exception as e:
-            print(f"  WARNING: Could not settle sniper trade {trade_id}: {e}")
-            return
+        self._safe_update("trades", {
+            "status":         "closed",
+            "pnl":            pnl,
+            "outcome":        outcome,
+            "exit_price":     exit_price,
+            "exit_timestamp": _now_iso(),
+        }, "id", trade_id)
 
         new_bankroll = self.get_bankroll() + payout
         self._set_bankroll(new_bankroll)
