@@ -18,13 +18,16 @@ import sys
 import time
 from datetime import datetime
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 from dotenv import load_dotenv
 
 from executor import SupabaseExecutor
 from market_fetcher import fetch_live_markets, _load_cache
 from sniper_fetcher import SnifferAPIError, MatchResult, fetch_all_results
 
-load_dotenv()
+load_dotenv(override=True)
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 STRATEGY      = "sniper"

@@ -16,13 +16,17 @@ import sys
 import time
 from datetime import datetime
 
+# Force UTF-8 output so Unicode box/dash chars print on Windows terminals
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 import anthropic
 from dotenv import load_dotenv
 
 from executor import SupabaseExecutor
 from market_fetcher import fetch_live_markets
 
-load_dotenv()
+load_dotenv(override=True)
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 MODEL            = "claude-sonnet-4-6"
