@@ -1,0 +1,38 @@
+services:
+  - type: worker
+    name: trading-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: sh -c 'python bot.py & python sniper.py & wait'
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: POLYMARKET_API_KEY
+        sync: false
+      - key: POLYMARKET_SECRET
+        sync: false
+      - key: POLYMARKET_PASSPHRASE
+        sync: false
+      - key: POLYMARKET_PRIVATE_KEY
+        sync: false
+      - key: POLYMARKET_FUNDER
+        sync: false
+      - key: USE_LIVE_MARKETS
+        value: "true"
+      - key: PANDASCORE_API_KEY
+        sync: false
+      - key: API_FOOTBALL_KEY
+        sync: false
+      - key: ANALYTICAL_BOT_INTERVAL_MINUTES
+        value: "30"
+      - key: SNIPER_POLL_INTERVAL_SECONDS
+        value: "15"
+      - key: ANALYTICAL_MAX_BET_PCT
+        value: "0.05"
+      - key: SNIPER_MAX_BET_PCT
+        value: "0.20"

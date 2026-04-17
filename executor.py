@@ -2,17 +2,24 @@
 executor.py — Supabase-backed Trade Executor
 Shared by both the analytical bot (bot.py) and the sniper bot (sniper.py).
 All state (bankroll, trades) lives in Supabase — no local file writes.
+Real orders are placed via Polymarket CLOB when credentials are present;
+falls back to simulation-only mode if CLOB is unavailable.
 """
 
+import json
 import os
 import random
 from datetime import datetime, timezone
 from typing import Optional
 
+import requests
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
 load_dotenv()
+
+CLOB_HOST = "https://clob.polymarket.com"
+GAMMA_HOST = "https://gamma-api.polymarket.com"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
@@ -101,6 +108,93 @@ class SupabaseExecutor:
             }).eq("strategy", self.strategy).execute()
         except Exception as e:
             print(f"  WARNING: Could not update bankroll — {e}")
+
+    # ── CLOB helpers ──────────────────────────────────────────────────────────
+
+    def _build_clob_client(self):
+        """Build a py-clob-client ClobClient. Returns None if credentials missing."""
+        try:
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import ApiCreds
+
+            pk         = os.environ.get("POLYMARKET_PRIVATE_KEY", "")
+            api_key    = os.environ.get("POLYMARKET_API_KEY", "")
+            secret     = os.environ.get("POLYMARKET_SECRET", "")
+            passphrase = os.environ.get("POLYMARKET_PASSPHRASE", "")
+            funder     = os.environ.get("POLYMARKET_FUNDER", "")
+
+            if not all([pk, api_key, secret, passphrase, funder]):
+                return None
+
+            creds = ApiCreds(
+                api_key=api_key,
+                api_secret=secret,
+                api_passphrase=passphrase,
+            )
+            return ClobClient(
+                CLOB_HOST,
+                key=pk,
+                chain_id=137,
+                creds=creds,
+                signature_type=1,
+                funder=funder,
+            )
+        except Exception as e:
+            print(f"  WARNING: Could not build CLOB client — {e}")
+            return None
+
+    def _resolve_token_id(self, market_id: str, recommendation: str) -> Optional[str]:
+        """Fetch the YES or NO clobTokenId for a market from the Gamma API."""
+        try:
+            resp = requests.get(
+                f"{GAMMA_HOST}/markets",
+                params={"id": market_id},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            market = data[0] if isinstance(data, list) and data else data
+            raw_ids = market.get("clobTokenIds", "[]")
+            token_ids = json.loads(raw_ids) if isinstance(raw_ids, str) else raw_ids
+            # index 0 = YES, index 1 = NO
+            idx = 0 if recommendation == "YES" else 1
+            return str(token_ids[idx]) if len(token_ids) > idx else None
+        except Exception as e:
+            print(f"  WARNING: Could not resolve token_id for {market_id} — {e}")
+            return None
+
+    def _place_clob_order(
+        self,
+        token_id: str,
+        price: float,
+        size_usd: float,
+    ) -> Optional[str]:
+        """
+        Place a BUY limit order on the CLOB. Returns order id on success, None on failure.
+        size_usd is the dollar amount; shares = size_usd / price.
+        """
+        try:
+            from py_clob_client.clob_types import OrderArgs, BUY
+
+            clob = self._build_clob_client()
+            if clob is None:
+                return None
+
+            shares = round(size_usd / max(price, 0.001), 4)
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=round(price, 4),
+                size=shares,
+                side=BUY,
+            )
+            resp = clob.create_and_post_order(order_args)
+            order_id = resp.get("orderID") or resp.get("id") if isinstance(resp, dict) else None
+            print(f"  [CLOB] Order placed — id={order_id}  token={token_id}  "
+                  f"price={price:.3f}  shares={shares:.4f}")
+            return order_id
+        except Exception as e:
+            print(f"  WARNING: CLOB order failed — {e}  (trade still logged in Supabase)")
+            return None
 
     # ── Trade execution ────────────────────────────────────────────────────────
 
@@ -200,6 +294,14 @@ class SupabaseExecutor:
               f"'{q[:60]}{'...' if len(q)>60 else ''}'")
         print(f"    Bet: ${bet_size:.2f}  Entry: {entry_price:.3f}  "
               f"Edge: {edge:.1%}  Conf: {confidence:.0%}  Source: {source}")
+
+        # ── Real CLOB order (best-effort, never crashes the bot) ──────────────
+        token_id = self._resolve_token_id(market_id, recommendation)
+        if token_id:
+            self._place_clob_order(token_id, entry_price, bet_size)
+        else:
+            print("  [CLOB] No token_id — running in simulation mode.")
+
         return trade_row
 
     # ── Analytical resolution (probabilistic) ──────────────────────────────────

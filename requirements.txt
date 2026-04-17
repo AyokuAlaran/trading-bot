@@ -12,3 +12,6 @@ requests>=2.31.0
 
 # Environment variable loading from .env
 python-dotenv>=1.0.0
+
+# Polymarket CLOB client — real order execution
+py-clob-client>=0.17.0
