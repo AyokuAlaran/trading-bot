@@ -16,5 +16,8 @@ feedparser>=6.0.0
 # Environment variable loading from .env
 python-dotenv>=1.0.0
 
+# Flask — health server required by Render free web-service tier
+flask>=3.0.0
+
 # Polymarket CLOB client — real order execution
 py-clob-client>=0.17.0

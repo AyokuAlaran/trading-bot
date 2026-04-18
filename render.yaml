@@ -1,10 +1,10 @@
 services:
-  - type: worker
+  - type: web
     name: trading-bot
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: sh -c 'python bot.py & python sniper.py & wait'
+    startCommand: python server.py
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
