@@ -26,8 +26,8 @@ REQUEST_TIMEOUT    = 15          # seconds before giving up on the API call
 CACHE_MAX_AGE_S    = 3600        # treat cache as fresh for 1 hour
 MIN_LIQUIDITY      = 1_000.0     # skip markets with less than $1 000 liquidity
 MIN_VOLUME_24H     = 1_000.0     # skip markets with less than $1 000 daily volume
-MAX_MARKETS        = 20          # cap how many markets we pass to Claude
-FETCH_BATCH        = 200         # how many raw markets to pull before filtering
+MAX_MARKETS        = 50          # cap how many markets we pass to Claude
+FETCH_BATCH        = 500         # how many raw markets to pull before filtering
 
 
 # ── Parsing helpers ────────────────────────────────────────────────────────────

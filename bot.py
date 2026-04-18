@@ -31,7 +31,7 @@ load_dotenv(override=True)
 # ── Configuration ──────────────────────────────────────────────────────────────
 MODEL            = "claude-sonnet-4-6"
 MARKETS_FILE     = "mock_markets.json"
-MIN_EDGE         = 0.05
+MIN_EDGE         = 0.03
 MAX_TOKENS       = 8192
 STRATEGY         = "analytical"
 MAX_BET_PCT      = float(os.environ.get("ANALYTICAL_MAX_BET_PCT", "0.05"))

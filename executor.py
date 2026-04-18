@@ -440,11 +440,13 @@ class SupabaseExecutor:
         bet_wins = (rec == "YES" and resolved_yes) or (rec == "NO" and not resolved_yes)
 
         if bet_wins:
-            payout     = round(amount / max(entry_price, 0.001), 4)
-            pnl        = round(payout - amount, 4)
-            exit_price = 1.0
-            outcome    = "WIN"
-            bankroll   = round(bankroll + payout, 2)
+            payout       = round(amount / max(entry_price, 0.001), 4)
+            pnl          = round(payout - amount, 4)
+            exit_price   = 1.0
+            outcome      = "WIN"
+            # Compound 50% of profit back; stake always returns
+            compounded   = round(amount + pnl * 0.50, 4)
+            bankroll     = round(bankroll + compounded, 2)
         else:
             pnl        = round(-amount, 4)
             exit_price = 0.0
