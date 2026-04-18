@@ -1,290 +1,125 @@
 """
-sniper_fetcher.py — Live Sports & Esports Result Fetcher
+sniper_fetcher.py — Breaking News Feed Monitor
 
-Fetches CONFIRMED match outcomes from:
-  • PandaScore  (esports: CS2, LoL, Dota 2, Valorant)
-  • API-Football (football/soccer)
+Fetches headlines from free RSS feeds and returns only articles published
+in the last NEWS_WINDOW_MINUTES minutes.
 
-STRICT no-fallback policy: if an API is down or returns no usable data,
-this module raises SnifferAPIError. The sniper bot catches this and pauses
-the current poll cycle — it never falls back to cached or mock data.
+Sources:
+  Reuters Top News, AP News, BBC News, Reuters Politics
+
+Raises SnifferAPIError if ALL sources return no data.
 """
 
-import os
+import re
+import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-import requests
+import feedparser
 
-REQUEST_TIMEOUT = 12   # seconds
+NEWS_WINDOW_MINUTES = 15
 
-PANDASCORE_BASE  = "https://api.pandascore.co"
-API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
-
-# How far back to look for recently-finished matches
-LOOKBACK_MINUTES = 30
+RSS_FEEDS = {
+    "BBC News":          "http://feeds.bbci.co.uk/news/rss.xml",
+    "BBC World":         "http://feeds.bbci.co.uk/news/world/rss.xml",
+    "Guardian World":    "https://www.theguardian.com/world/rss",
+    "Al Jazeera":        "https://www.aljazeera.com/xml/rss/all.xml",
+}
 
 
 class SnifferAPIError(Exception):
-    """Raised when a live data API is unavailable or returns unusable data."""
+    """Raised when all news sources fail or return nothing."""
 
 
 @dataclass
-class MatchResult:
-    source:     str           # 'pandascore' | 'api_football'
-    sport:      str           # 'cs2' | 'lol' | 'dota2' | 'valorant' | 'football'
-    match_id:   str
-    team_a:     str           # first/home team
-    team_b:     str           # second/away team
-    winner:     Optional[str] # winning team name, None if draw or unknown
-    status:     str           # 'finished' | 'running'
-    started_at: Optional[datetime]
+class NewsItem:
+    headline:     str
+    summary:      str
+    source:       str
+    published_at: Optional[datetime]
+    url:          str
 
 
-# ── PandaScore ─────────────────────────────────────────────────────────────────
-
-def _pandascore_headers() -> dict:
-    key = os.environ.get("PANDASCORE_API_KEY", "")
-    if not key:
-        raise SnifferAPIError(
-            "PANDASCORE_API_KEY is not set. "
-            "Get a free key at pandascore.co and add it to .env"
-        )
-    return {"Authorization": f"Bearer {key}", "Accept": "application/json"}
-
-
-def _parse_pandascore_match(raw: dict, sport: str) -> Optional[MatchResult]:
-    """Convert one raw PandaScore match dict into a MatchResult."""
-    status = str(raw.get("status", "")).lower()
-    if status not in ("finished", "running"):
+def _parse_pub_date(entry) -> Optional[datetime]:
+    """Extract UTC datetime from a feedparser entry's published_parsed field."""
+    t = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+    if t is None:
+        return None
+    try:
+        return datetime(*t[:6], tzinfo=timezone.utc)
+    except (TypeError, ValueError):
         return None
 
-    opponents = raw.get("opponents", [])
-    if len(opponents) < 2:
-        return None
 
-    team_a = (opponents[0].get("opponent") or {}).get("name", "")
-    team_b = (opponents[1].get("opponent") or {}).get("name", "")
-    if not team_a or not team_b:
-        return None
+def _strip_html(text: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()[:500]
 
-    winner_obj = raw.get("winner")
-    winner = winner_obj.get("name") if isinstance(winner_obj, dict) else None
 
-    begin_at = raw.get("begin_at") or raw.get("scheduled_at")
-    started_at = None
-    if begin_at:
+def _fetch_feed(name: str, url: str, cutoff: datetime) -> list[NewsItem]:
+    """Parse one RSS feed and return items newer than cutoff."""
+    try:
+        feed = feedparser.parse(url)
+        if feed.bozo and not feed.entries:
+            return []
+
+        items = []
+        for entry in feed.entries:
+            pub = _parse_pub_date(entry)
+            if pub is None or pub < cutoff:
+                continue
+
+            headline = getattr(entry, "title", "").strip()
+            raw_sum  = getattr(entry, "summary", "") or getattr(entry, "description", "")
+            summary  = _strip_html(raw_sum)
+            link     = getattr(entry, "link", "")
+
+            if not headline or not link:
+                continue
+
+            items.append(NewsItem(
+                headline=headline,
+                summary=summary,
+                source=name,
+                published_at=pub,
+                url=link,
+            ))
+        return items
+    except Exception:
+        return []
+
+
+def fetch_breaking_news() -> list[NewsItem]:
+    """
+    Return articles from all RSS feeds published in the last NEWS_WINDOW_MINUTES.
+    Results are sorted newest-first.
+    Raises SnifferAPIError if all sources fail AND no articles were found.
+    """
+    cutoff    = datetime.now(timezone.utc) - timedelta(minutes=NEWS_WINDOW_MINUTES)
+    all_items: list[NewsItem] = []
+    failures:  list[str]      = []
+
+    for name, url in RSS_FEEDS.items():
         try:
-            started_at = datetime.fromisoformat(begin_at.replace("Z", "+00:00"))
-        except ValueError:
-            pass
+            batch = _fetch_feed(name, url, cutoff)
+            if batch:
+                print(f"  [{name}] {len(batch)} article(s) in last {NEWS_WINDOW_MINUTES}m")
+            else:
+                print(f"  [{name}] 0 articles in last {NEWS_WINDOW_MINUTES}m")
+            all_items.extend(batch)
+        except Exception as e:
+            failures.append(f"{name}: {e}")
+            print(f"  [{name}] ERROR: {e}")
 
-    return MatchResult(
-        source="pandascore",
-        sport=sport,
-        match_id=str(raw.get("id", "")),
-        team_a=team_a,
-        team_b=team_b,
-        winner=winner,
-        status=status,
-        started_at=started_at,
+    if not all_items and len(failures) == len(RSS_FEEDS):
+        raise SnifferAPIError(f"All {len(RSS_FEEDS)} RSS feeds failed: {failures[0]}")
+
+    all_items.sort(
+        key=lambda x: x.published_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
     )
-
-
-def fetch_esports_results() -> list[MatchResult]:
-    """
-    Fetch recently-finished and currently-running esports matches from PandaScore.
-
-    Raises SnifferAPIError if the API key is missing, the request fails,
-    or the response contains no usable data.
-    """
-    headers = _pandascore_headers()
-    since   = (datetime.now(timezone.utc) - timedelta(minutes=LOOKBACK_MINUTES)).isoformat()
-
-    results: list[MatchResult] = []
-    errors: list[str] = []
-
-    # Videogames we care about and their PandaScore slug
-    videogames = {
-        "cs2":      "cs-go",
-        "lol":      "lol",
-        "dota2":    "dota-2",
-        "valorant": "valorant",
-    }
-
-    for sport, slug in videogames.items():
-        # Recently-finished matches
-        for endpoint in (
-            f"{PANDASCORE_BASE}/matches/past?filter[videogame]={slug}&range[end_at]={since},",
-            f"{PANDASCORE_BASE}/{slug}/matches/running",
-        ):
-            try:
-                resp = requests.get(
-                    endpoint,
-                    headers=headers,
-                    timeout=REQUEST_TIMEOUT,
-                    params={"per_page": 50},
-                )
-                if resp.status_code == 404:
-                    continue
-                resp.raise_for_status()
-                for raw in resp.json():
-                    m = _parse_pandascore_match(raw, sport)
-                    if m:
-                        results.append(m)
-            except requests.RequestException as e:
-                errors.append(f"PandaScore/{sport}: {e}")
-
-    if errors and not results:
-        raise SnifferAPIError(
-            f"PandaScore API unavailable — {len(errors)} error(s): {errors[0]}"
-        )
-
-    finished = [r for r in results if r.status == "finished" and r.winner]
-    if not finished and not any(r.status == "running" for r in results):
-        # API responded but no usable data right now — treat as transient
-        raise SnifferAPIError(
-            "PandaScore returned no finished or live matches at this time."
-        )
-
-    return results
-
-
-# ── API-Football ───────────────────────────────────────────────────────────────
-
-def _football_headers() -> dict:
-    key = os.environ.get("API_FOOTBALL_KEY", "")
-    if not key:
-        raise SnifferAPIError(
-            "API_FOOTBALL_KEY is not set. "
-            "Get a free key at api-football.com and add it to .env"
-        )
-    return {"x-apisports-key": key, "Accept": "application/json"}
-
-
-def _parse_football_fixture(raw: dict) -> Optional[MatchResult]:
-    """Convert one API-Football fixture response item into a MatchResult."""
-    fixture = raw.get("fixture", {})
-    status  = (fixture.get("status") or {}).get("short", "")
-
-    if status not in ("FT", "AET", "PEN", "1H", "HT", "2H", "ET", "BT"):
-        return None
-
-    is_finished = status in ("FT", "AET", "PEN")
-
-    teams = raw.get("teams", {})
-    home  = teams.get("home", {})
-    away  = teams.get("away", {})
-
-    team_a = home.get("name", "")
-    team_b = away.get("name", "")
-    if not team_a or not team_b:
-        return None
-
-    winner = None
-    if is_finished:
-        if home.get("winner") is True:
-            winner = team_a
-        elif away.get("winner") is True:
-            winner = team_b
-        # winner stays None for draws
-
-    date_str = fixture.get("date")
-    started_at = None
-    if date_str:
-        try:
-            started_at = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-        except ValueError:
-            pass
-
-    return MatchResult(
-        source="api_football",
-        sport="football",
-        match_id=str(fixture.get("id", "")),
-        team_a=team_a,
-        team_b=team_b,
-        winner=winner,
-        status="finished" if is_finished else "running",
-        started_at=started_at,
-    )
-
-
-def fetch_football_results() -> list[MatchResult]:
-    """
-    Fetch live and recently-finished football fixtures from API-Football.
-
-    Raises SnifferAPIError if the API key is missing, the request fails,
-    or the response contains no usable data.
-    """
-    headers = _football_headers()
-    today   = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    results: list[MatchResult] = []
-    errors:  list[str] = []
-
-    for params in (
-        {"live": "all"},
-        {"date": today, "status": "FT"},
-    ):
-        try:
-            resp = requests.get(
-                f"{API_FOOTBALL_BASE}/fixtures",
-                headers=headers,
-                params=params,
-                timeout=REQUEST_TIMEOUT,
-            )
-            resp.raise_for_status()
-            body = resp.json()
-
-            # API-Football wraps results in response[]
-            for item in body.get("response", []):
-                m = _parse_football_fixture(item)
-                if m:
-                    results.append(m)
-        except requests.RequestException as e:
-            errors.append(str(e))
-
-    if errors and not results:
-        raise SnifferAPIError(
-            f"API-Football unavailable — {errors[0]}"
-        )
-
-    if not results:
-        raise SnifferAPIError(
-            "API-Football returned no live or finished fixtures right now."
-        )
-
-    return results
-
-
-# ── Combined fetch ─────────────────────────────────────────────────────────────
-
-def fetch_all_results() -> list[MatchResult]:
-    """
-    Fetch from both PandaScore and API-Football.
-    Returns combined list of results.
-    Raises SnifferAPIError only if BOTH sources fail with zero results.
-    Partial failures are logged but tolerated if at least one source works.
-    """
-    results: list[MatchResult] = []
-    failures: list[str] = []
-
-    for fetcher, label in (
-        (fetch_esports_results, "PandaScore"),
-        (fetch_football_results, "API-Football"),
-    ):
-        try:
-            batch = fetcher()
-            results.extend(batch)
-            print(f"  [{label}] {len(batch)} match result(s) fetched")
-        except SnifferAPIError as e:
-            failures.append(f"{label}: {e}")
-            print(f"  [{label}] WARNING: {e}")
-
-    if not results:
-        raise SnifferAPIError(
-            f"All live data sources failed — cannot trade this cycle.\n"
-            + "\n".join(failures)
-        )
-
-    return results
+    return all_items

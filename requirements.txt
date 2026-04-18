@@ -7,8 +7,11 @@ anthropic>=0.40.0
 # Supabase Python client — all state storage (replaces trades.json)
 supabase>=2.0.0
 
-# HTTP client — Polymarket Gamma API + PandaScore + API-Football
+# HTTP client — Polymarket Gamma API
 requests>=2.31.0
+
+# RSS feed parsing — sniper news monitor
+feedparser>=6.0.0
 
 # Environment variable loading from .env
 python-dotenv>=1.0.0
