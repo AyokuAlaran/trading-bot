@@ -32,7 +32,7 @@ load_dotenv(override=True)
 MODEL            = "claude-sonnet-4-6"
 MARKETS_FILE     = "mock_markets.json"
 MIN_EDGE         = 0.03
-MAX_TOKENS       = 8192
+MAX_TOKENS       = 16000
 STRATEGY         = "analytical"
 MAX_BET_PCT      = float(os.environ.get("ANALYTICAL_MAX_BET_PCT", "0.05"))
 LOOP_INTERVAL_M  = int(os.environ.get("ANALYTICAL_BOT_INTERVAL_MINUTES", "30"))
@@ -107,7 +107,7 @@ Return ONLY valid JSON — no prose before or after:
       "edge": <float>,
       "recommendation": "YES" | "NO" | "SKIP",
       "confidence": <float 0-1>,
-      "reasoning": "2-3 sentence explanation",
+      "reasoning": "1 sentence explanation",
       "suggested_bet_fraction": <float 0-{MAX_BET_PCT}>
     }}
   ],
