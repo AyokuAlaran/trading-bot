@@ -172,6 +172,8 @@ def place_sniper_bet(
         "edge":                       edge,
         "confidence":                 confidence,
         "estimated_true_probability": 1.0 if rec == "YES" else 0.0,
+        "yes_token_id":               market.get("yes_token_id"),
+        "no_token_id":                market.get("no_token_id"),
         "reasoning": (
             f"[SNIPER] Confirmed outcome from {result.source}: "
             f"{result.winner} beat {result.team_a if result.winner == result.team_b else result.team_b} "

@@ -32,7 +32,7 @@ load_dotenv(override=True)
 MODEL            = "claude-sonnet-4-6"
 MARKETS_FILE     = "mock_markets.json"
 MIN_EDGE         = 0.05
-MAX_TOKENS       = 4096
+MAX_TOKENS       = 8192
 STRATEGY         = "analytical"
 MAX_BET_PCT      = float(os.environ.get("ANALYTICAL_MAX_BET_PCT", "0.05"))
 LOOP_INTERVAL_M  = int(os.environ.get("ANALYTICAL_BOT_INTERVAL_MINUTES", "30"))
@@ -153,6 +153,13 @@ Include ALL {len(markets)} markets even as SKIPs."""
     elif "```" in raw:
         raw = raw[raw.find("```") + 3 : raw.find("```", raw.find("```") + 3)].strip()
 
+    # If Claude prefixed prose before the JSON object, strip it
+    if not raw.lstrip().startswith("{"):
+        start = raw.find("{")
+        end   = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            raw = raw[start : end + 1]
+
     try:
         result = json.loads(raw)
     except json.JSONDecodeError as e:
@@ -215,6 +222,8 @@ def run_cycle(executor: SupabaseExecutor, client: anthropic.Anthropic):
             market = next((m for m in markets if m["market_id"] == opp["market_id"]), None)
             if market:
                 opp["current_price"] = market["current_yes_price"]
+                opp["yes_token_id"]  = market.get("yes_token_id")
+                opp["no_token_id"]   = market.get("no_token_id")
             executor.execute_trade(opp, source="claude")
 
     if skipped:

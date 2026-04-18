@@ -40,7 +40,7 @@ class SupabaseExecutor:
         kelly_fraction:   Kelly multiplier (0.25 for analytical, 0.50 for sniper)
     """
 
-    MIN_BET_SIZE = 0.01  # lowered to match small real-money bankrolls
+    MIN_BET_SIZE = 1.0   # Polymarket minimum order size
 
     def __init__(
         self,
@@ -243,28 +243,37 @@ class SupabaseExecutor:
         size_usd: float,
     ) -> Optional[str]:
         """
-        Place a BUY limit order on the CLOB. Returns order id on success, None on failure.
-        size_usd is the dollar amount; shares = size_usd / price.
+        Place a market (FOK) BUY order on the CLOB. Returns order id on success.
+        size_usd is the dollar amount (minimum $1 per Polymarket rules).
         """
         try:
-            from py_clob_client.clob_types import OrderArgs, BUY
+            from py_clob_client.clob_types import MarketOrderArgs
+            from py_clob_client.order_builder.constants import BUY
 
             clob = self._build_clob_client()
             if clob is None:
                 return None
 
-            shares = round(size_usd / max(price, 0.001), 4)
-            order_args = OrderArgs(
+            order_args = MarketOrderArgs(
                 token_id=token_id,
-                price=round(price, 4),
-                size=shares,
+                amount=round(size_usd, 4),
                 side=BUY,
             )
-            resp = clob.create_and_post_order(order_args)
-            order_id = resp.get("orderID") or resp.get("id") if isinstance(resp, dict) else None
-            print(f"  [CLOB] Order placed — id={order_id}  token={token_id}  "
-                  f"price={price:.3f}  shares={shares:.4f}")
-            return order_id
+            from py_clob_client.clob_types import OrderType
+            signed = clob.create_market_order(order_args)
+            resp = clob.post_order(signed, OrderType.FOK)
+            print(f"  [CLOB] Raw response: {resp!r}")
+            if isinstance(resp, dict):
+                order_id = resp.get("orderID") or resp.get("id") or resp.get("orderId")
+                status   = resp.get("status") or resp.get("success")
+                error    = resp.get("errorMsg") or resp.get("error")
+                if error:
+                    print(f"  [CLOB] Order rejected — {error}")
+                    return None
+                print(f"  [CLOB] Order placed — id={order_id}  status={status}  "
+                      f"token={token_id[:16]}...  amount=${size_usd:.2f}")
+                return order_id
+            return None
         except Exception as e:
             print(f"  WARNING: CLOB order failed — {e}  (trade still logged in Supabase)")
             return None
@@ -304,8 +313,13 @@ class SupabaseExecutor:
         bet_size   = round(bankroll * bet_frac, 2)
 
         if bet_size < self.MIN_BET_SIZE:
-            print(f"  [{self.strategy}] Bet ${bet_size:.2f} below minimum — skipped")
-            return None
+            max_allowed = bankroll * self.max_bet_fraction
+            if self.MIN_BET_SIZE <= max_allowed:
+                bet_size = self.MIN_BET_SIZE
+                print(f"  [{self.strategy}] Bet floored to minimum ${bet_size:.2f}")
+            else:
+                print(f"  [{self.strategy}] Bankroll too small for minimum bet — skipped")
+                return None
 
         # ── Duplicate guard ───────────────────────────────────────────────────
         market_id = str(opportunity.get("market_id", ""))
@@ -367,11 +381,16 @@ class SupabaseExecutor:
               f"Edge: {edge:.1%}  Conf: {confidence:.0%}  Source: {source}")
 
         # ── Real CLOB order (best-effort, never crashes the bot) ──────────────
-        token_id = self._resolve_token_id(market_id, recommendation)
+        # Prefer token IDs forwarded from market data; fall back to API re-fetch.
+        if recommendation == "YES":
+            token_id = opportunity.get("yes_token_id") or self._resolve_token_id(market_id, "YES")
+        else:
+            token_id = opportunity.get("no_token_id") or self._resolve_token_id(market_id, "NO")
+
         if token_id:
             self._place_clob_order(token_id, entry_price, bet_size)
         else:
-            print("  [CLOB] No token_id — running in simulation mode.")
+            print("  [CLOB] No token_id in market data — skipping real order.")
 
         return trade_row
 

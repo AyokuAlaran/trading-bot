@@ -150,18 +150,25 @@ def _map_market(raw: dict) -> Optional[dict]:
     if not market_id:
         return None
 
+    # clobTokenIds is a JSON-encoded array: index 0 = YES token, index 1 = NO token
+    clob_ids    = _parse_json_field(raw.get("clobTokenIds"))
+    yes_token   = str(clob_ids[0]) if len(clob_ids) > 0 else None
+    no_token    = str(clob_ids[1]) if len(clob_ids) > 1 else None
+
     return {
-        "market_id":        market_id,
-        "question":         question,
-        "category":         _extract_category(raw),
+        "market_id":         market_id,
+        "question":          question,
+        "category":          _extract_category(raw),
         "current_yes_price": yes_price,
-        "volume_24h":       round(volume_24h, 2),
-        "liquidity":        round(liquidity, 2),
-        "end_date":         _parse_end_date(str(raw.get("endDate") or "")),
-        "description":      str(raw.get("description") or "").strip(),
-        # Extra fields kept for reference but ignored by bot.py / executor.py
-        "slug":             str(raw.get("slug") or ""),
-        "_source":          "live",
+        "volume_24h":        round(volume_24h, 2),
+        "liquidity":         round(liquidity, 2),
+        "end_date":          _parse_end_date(str(raw.get("endDate") or "")),
+        "description":       str(raw.get("description") or "").strip(),
+        "slug":              str(raw.get("slug") or ""),
+        "condition_id":      str(raw.get("conditionId") or ""),
+        "yes_token_id":      yes_token,
+        "no_token_id":       no_token,
+        "_source":           "live",
     }
 
 
