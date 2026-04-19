@@ -28,6 +28,11 @@ RSS_FEEDS = {
     "BBC World":         "http://feeds.bbci.co.uk/news/world/rss.xml",
     "Guardian World":    "https://www.theguardian.com/world/rss",
     "Al Jazeera":        "https://www.aljazeera.com/xml/rss/all.xml",
+    "Bloomberg Markets": "https://feeds.bloomberg.com/markets/news.rss",
+    "AP News":           "https://rsshub.app/apnews/topics/apf-topnews",
+    "AP News Alt":       "https://apnews.com/rss",
+    "CNBC":              "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    "Reuters Politics":  "https://feeds.reuters.com/reuters/politicsNews",
 }
 
 

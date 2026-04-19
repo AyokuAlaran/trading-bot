@@ -30,6 +30,19 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_json_list(value) -> list:
+    """Safely coerce a JSON-string or list to a plain Python list."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
 class SupabaseExecutor:
     """
     Manages trades and bankroll for one strategy in Supabase.
@@ -278,6 +291,119 @@ class SupabaseExecutor:
             print(f"  WARNING: CLOB order failed — {e}  (trade still logged in Supabase)")
             return None
 
+    # ── Real settlement checker ────────────────────────────────────────────────
+
+    def settle_open_positions(self):
+        """
+        Query Polymarket for each open position and settle any that have resolved.
+        Called at the top of every bot cycle in place of the old simulate_resolutions().
+        Reinvestment policy: sniper = 100% of profit, analytical = 50%.
+        """
+        try:
+            res = (
+                self.supabase.table("trades")
+                .select("*")
+                .eq("strategy", self.strategy)
+                .eq("status", "open")
+                .execute()
+            )
+            open_trades = res.data or []
+        except Exception as e:
+            print(f"  WARNING: Could not fetch open positions: {e}")
+            return
+
+        if not open_trades:
+            print("  No open positions to check.")
+            return
+
+        print(f"  Checking {len(open_trades)} open position(s) against Polymarket...")
+        bankroll = self.get_bankroll()
+        settled  = 0
+
+        for trade in open_trades:
+            market_id = trade.get("market_id", "")
+            try:
+                resp = requests.get(
+                    f"{GAMMA_HOST}/markets",
+                    params={"id": market_id},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                data   = resp.json()
+                market = data[0] if isinstance(data, list) and data else data
+            except Exception as e:
+                print(f"    WARNING: Could not fetch market {market_id}: {e}")
+                continue
+
+            if not market.get("resolved"):
+                continue
+
+            outcomes = _parse_json_list(market.get("outcomes"))
+            prices   = _parse_json_list(market.get("outcomePrices"))
+
+            if not outcomes or not prices or len(outcomes) != len(prices):
+                continue
+
+            yes_idx = next(
+                (i for i, o in enumerate(outcomes)
+                 if str(o).strip().lower() in ("yes", "true", "1")),
+                None,
+            )
+            if yes_idx is None:
+                continue
+
+            market_resolved_yes = float(prices[yes_idx]) >= 0.99
+            rec      = trade.get("recommendation", "YES")
+            bet_wins = (rec == "YES" and market_resolved_yes) or \
+                       (rec == "NO"  and not market_resolved_yes)
+
+            amount      = float(trade.get("amount", 0))
+            entry_price = float(trade.get("entry_price", 0.5))
+
+            if bet_wins:
+                payout = round(amount / max(entry_price, 0.001), 4)
+                pnl    = round(payout - amount, 4)
+                if self.strategy == "sniper":
+                    bankroll = round(bankroll + payout, 2)          # 100% reinvest
+                else:
+                    bankroll = round(bankroll + amount + pnl * 0.5, 2)  # 50% reinvest
+                outcome    = "WIN"
+                exit_price = 1.0
+            else:
+                pnl        = round(-amount, 4)
+                outcome    = "LOSS"
+                exit_price = 0.0
+
+            self._safe_update("trades", {
+                "status":         "closed",
+                "pnl":            pnl,
+                "outcome":        outcome,
+                "exit_price":     exit_price,
+                "exit_timestamp": _now_iso(),
+            }, "id", trade["id"])
+
+            tag = "[WIN] " if bet_wins else "[LOSS]"
+            q   = trade.get("question", market_id)[:50]
+            print(f"  {tag} '{q}...'  P&L=${pnl:+.2f}")
+            settled += 1
+
+        if settled:
+            self._set_bankroll(bankroll)
+            print(f"  Settled {settled} position(s). New bankroll: ${bankroll:.2f}")
+
+    # ── Liquidity-weighted sizing ──────────────────────────────────────────────
+
+    @staticmethod
+    def _liquidity_multiplier(volume_24h: float) -> float:
+        """Scale bet size by 24h market volume to favour liquid markets."""
+        if volume_24h >= 100_000:
+            return 1.2
+        if volume_24h >= 50_000:
+            return 1.0
+        if volume_24h >= 10_000:
+            return 0.8
+        return 0.5
+
     # ── Trade execution ────────────────────────────────────────────────────────
 
     def execute_trade(
@@ -305,29 +431,31 @@ class SupabaseExecutor:
             print(f"  [{self.strategy}] Bankroll ${bankroll:.2f} — no funds.")
             return None
 
-        # ── Bet sizing ────────────────────────────────────────────────────────
+        # ── Bet sizing with liquidity multiplier ─────────────────────────────
         edge       = float(opportunity.get("edge", 0.0))
         confidence = float(opportunity.get("confidence", 1.0))
+        volume_24h = float(opportunity.get("volume_24h", 0))
         raw_frac   = edge * confidence * self.kelly_fraction
         bet_frac   = min(max(raw_frac, 0.005), self.max_bet_fraction)
-        bet_size   = round(bankroll * bet_frac, 2)
+        liq_mult   = self._liquidity_multiplier(volume_24h)
+        bet_size   = round(bankroll * bet_frac * liq_mult, 2)
+        # Hard cap: never exceed max_bet_fraction × bankroll regardless of multiplier
+        bet_size   = min(bet_size, round(bankroll * self.max_bet_fraction, 2))
 
         if bet_size < self.MIN_BET_SIZE:
-            max_allowed = bankroll * self.max_bet_fraction
-            if self.MIN_BET_SIZE <= max_allowed:
+            if bankroll >= self.MIN_BET_SIZE:
                 bet_size = self.MIN_BET_SIZE
                 print(f"  [{self.strategy}] Bet floored to minimum ${bet_size:.2f}")
             else:
-                print(f"  [{self.strategy}] Bankroll too small for minimum bet — skipped")
+                print(f"  [{self.strategy}] Bankroll ${bankroll:.2f} below ${self.MIN_BET_SIZE:.2f} min — skipped")
                 return None
 
-        # ── Duplicate guard ───────────────────────────────────────────────────
+        # ── Cross-bot duplicate guard (checks all strategies) ─────────────────
         market_id = str(opportunity.get("market_id", ""))
         try:
             dup = (
                 self.supabase.table("trades")
                 .select("id")
-                .eq("strategy", self.strategy)
                 .eq("market_id", market_id)
                 .eq("status", "open")
                 .execute()

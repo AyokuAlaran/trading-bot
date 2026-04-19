@@ -1,22 +1,23 @@
 """
 bot.py — Analytical Bot (Claude AI)
 
-Loads live or mock prediction markets, asks Claude to find edges > 5%,
-and places trades via the Supabase-backed executor.
+Loads live prediction markets, splits them into 3 parallel batches,
+asks Claude to find edges > MIN_EDGE, and places trades via Supabase executor.
 
-Position sizing : 25% Kelly, max 5% of analytical bankroll per trade.
-Scheduling      : loops every ANALYTICAL_BOT_INTERVAL_MINUTES (default 30).
+Position sizing : 25% Kelly × liquidity multiplier, max 20% per trade.
+Scheduling      : loops every ANALYTICAL_BOT_INTERVAL_MINUTES (default 10).
 Data source     : USE_LIVE_MARKETS=true  → Polymarket Gamma API
-                  USE_LIVE_MARKETS=false → mock_markets.json  (default)
+                  USE_LIVE_MARKETS=false → mock_markets.json
 """
 
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime
+from typing import Optional
 
-# Force UTF-8 output so Unicode box/dash chars print on Windows terminals
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -29,13 +30,14 @@ from market_fetcher import fetch_live_markets
 load_dotenv(override=True)
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-MODEL            = "claude-sonnet-4-6"
-MARKETS_FILE     = "mock_markets.json"
-MIN_EDGE         = 0.03
-MAX_TOKENS       = 16000
-STRATEGY         = "analytical"
-MAX_BET_PCT      = float(os.environ.get("ANALYTICAL_MAX_BET_PCT", "0.05"))
-LOOP_INTERVAL_M  = int(os.environ.get("ANALYTICAL_BOT_INTERVAL_MINUTES", "30"))
+MODEL           = "claude-sonnet-4-6"
+MARKETS_FILE    = "mock_markets.json"
+MIN_EDGE        = 0.03
+MAX_TOKENS      = 8192
+STRATEGY        = "analytical"
+MAX_BET_PCT     = float(os.environ.get("ANALYTICAL_MAX_BET_PCT", "0.20"))
+LOOP_INTERVAL_M = int(os.environ.get("ANALYTICAL_BOT_INTERVAL_MINUTES", "10"))
+BATCH_SIZE      = 17   # ~50 markets split into 3 parallel Claude calls
 
 
 # ── Market loading ─────────────────────────────────────────────────────────────
@@ -64,7 +66,6 @@ def load_mock_markets(filepath: str = MARKETS_FILE) -> list:
 
 
 def get_markets() -> list:
-    """Return markets from live API or mock file based on USE_LIVE_MARKETS."""
     use_live = os.environ.get("USE_LIVE_MARKETS", "false").strip().lower() == "true"
     if use_live:
         markets = fetch_live_markets()
@@ -77,12 +78,7 @@ def get_markets() -> list:
 
 # ── Claude analysis ────────────────────────────────────────────────────────────
 
-def analyze_markets(client: anthropic.Anthropic, markets: list, bankroll: float) -> dict:
-    """
-    Send markets to Claude and receive JSON trading recommendations.
-    Raises ValueError on parse failure; anthropic.APIError on API failure.
-    """
-    system_prompt = f"""You are a professional prediction market analyst and quantitative trader.
+SYSTEM_PROMPT = f"""You are a professional prediction market analyst and quantitative trader.
 
 Your task: analyze open prediction markets and identify profitable trading opportunities.
 
@@ -94,6 +90,12 @@ For each market:
 5. Recommend NO  when true_probability < market_price - {MIN_EDGE}
 6. Suggest bet_fraction using 25% Kelly: edge * confidence * 0.25, capped at {MAX_BET_PCT}
 7. SKIP markets with edge <= {MIN_EDGE}
+
+Fade the market: if a market is priced above 0.80 YES or below 0.20 YES, consider \
+whether this reflects genuine probability or overreaction to recent news. \
+If you believe the market is overreacting, recommend fading (betting the opposite direction).
+
+Markets marked priority=HIGH resolve within 7 days — weight these more heavily.
 
 Return ONLY valid JSON — no prose before or after:
 
@@ -111,68 +113,121 @@ Return ONLY valid JSON — no prose before or after:
       "suggested_bet_fraction": <float 0-{MAX_BET_PCT}>
     }}
   ],
-  "summary": "1-2 sentence overall market commentary"
+  "summary": "1 sentence market commentary"
 }}
 
-Include ALL {len(markets)} markets even as SKIPs."""
+Include ALL markets in this batch even as SKIPs."""
 
-    market_list = [
-        {
-            "market_id":         m["market_id"],
-            "question":          m["question"],
-            "category":          m.get("category", ""),
-            "current_yes_price": m["current_yes_price"],
-            "volume_24h_usd":    m.get("volume_24h", 0),
-            "liquidity_usd":     m.get("liquidity", 0),
-            "end_date":          m.get("end_date", ""),
-            "description":       m.get("description", ""),
-        }
-        for m in markets
-    ]
 
-    user_msg = (
-        f"Date: {datetime.now().strftime('%Y-%m-%d')}\n"
-        f"Analytical bankroll: ${bankroll:.2f}\n\n"
-        f"Analyze these {len(markets)} markets and return JSON:\n\n"
-        f"{json.dumps(market_list, indent=2)}"
-    )
-
-    print(f"\nSending {len(markets)} markets to Claude ({MODEL})...")
-    print("=" * 60)
-
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_msg}],
-    )
-
-    raw = response.content[0].text
+def _parse_claude_response(raw: str) -> dict:
+    """Strip markdown fences and leading prose, then JSON-parse."""
     if "```json" in raw:
         raw = raw[raw.find("```json") + 7 : raw.find("```", raw.find("```json") + 7)].strip()
     elif "```" in raw:
         raw = raw[raw.find("```") + 3 : raw.find("```", raw.find("```") + 3)].strip()
-
-    # If Claude prefixed prose before the JSON object, strip it
     if not raw.lstrip().startswith("{"):
-        start = raw.find("{")
-        end   = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
+        start, end = raw.find("{"), raw.rfind("}")
+        if start != -1 and end > start:
             raw = raw[start : end + 1]
-
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"Claude response is not valid JSON.\nError: {e}\nRaw (500 chars): {raw[:500]}"
-        ) from e
-
+    result = json.loads(raw)
     if not isinstance(result.get("opportunities"), list):
         raise ValueError(f"Missing 'opportunities' list. Keys: {list(result.keys())}")
-
-    u = response.usage
-    print(f"Claude usage — in: {u.input_tokens} tokens | out: {u.output_tokens} tokens")
     return result
+
+
+def _call_batch(
+    client: anthropic.Anthropic,
+    batch: list,
+    bankroll: float,
+    batch_idx: int,
+    out: list,
+    errors: list,
+):
+    """Analyze one batch of markets. Writes result into out[batch_idx]."""
+    market_list = [
+        {
+            "market_id":      m["market_id"],
+            "question":       m["question"],
+            "category":       m.get("category", ""),
+            "yes_price":      m["current_yes_price"],
+            "volume_24h_usd": m.get("volume_24h", 0),
+            "liquidity_usd":  m.get("liquidity", 0),
+            "end_date":       m.get("end_date", ""),
+            "days_to_expiry": m.get("days_to_expiry"),
+            "priority":       m.get("priority", "NORMAL"),
+        }
+        for m in batch
+    ]
+    user_msg = (
+        f"Date: {datetime.now().strftime('%Y-%m-%d')}\n"
+        f"Bankroll: ${bankroll:.2f}  |  Batch {batch_idx + 1}\n\n"
+        f"Analyze these {len(batch)} markets:\n\n"
+        f"{json.dumps(market_list, indent=2)}"
+    )
+    try:
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        result = _parse_claude_response(resp.content[0].text)
+        result["_tokens_in"]  = resp.usage.input_tokens
+        result["_tokens_out"] = resp.usage.output_tokens
+        out[batch_idx] = result
+    except Exception as e:
+        errors.append(f"Batch {batch_idx + 1}: {e}")
+
+
+def analyze_markets(client: anthropic.Anthropic, markets: list, bankroll: float) -> dict:
+    """
+    Split markets into parallel batches, call Claude concurrently, merge results.
+    Returns merged dict with all opportunities sorted by edge descending.
+    """
+    batches = [markets[i : i + BATCH_SIZE] for i in range(0, len(markets), BATCH_SIZE)]
+    out     = [None] * len(batches)
+    errors: list[str] = []
+
+    print(f"\nSending {len(markets)} markets to Claude ({MODEL}) in {len(batches)} parallel batch(es)...")
+    print("=" * 60)
+
+    threads = [
+        threading.Thread(target=_call_batch, args=(client, b, bankroll, i, out, errors))
+        for i, b in enumerate(batches)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    if errors and all(r is None for r in out):
+        raise ValueError(f"All batches failed: {'; '.join(errors)}")
+    if errors:
+        print(f"  WARNING: {len(errors)} batch(es) failed: {'; '.join(errors)}")
+
+    # Merge and deduplicate (keep highest edge per market_id)
+    seen: dict[str, dict] = {}
+    summaries = []
+    total_in = total_out = 0
+    for r in out:
+        if r is None:
+            continue
+        total_in  += r.get("_tokens_in", 0)
+        total_out += r.get("_tokens_out", 0)
+        if r.get("summary"):
+            summaries.append(r["summary"])
+        for opp in r.get("opportunities", []):
+            mid = opp.get("market_id", "")
+            if mid not in seen or opp.get("edge", 0) > seen[mid].get("edge", 0):
+                seen[mid] = opp
+
+    opportunities = sorted(seen.values(), key=lambda x: x.get("edge", 0), reverse=True)
+    print(f"Claude usage — in: {total_in} tokens | out: {total_out} tokens  ({len(batches)} batches)")
+
+    return {
+        "opportunities": opportunities,
+        "summary":       " | ".join(summaries),
+    }
 
 
 # ── Single analysis cycle ──────────────────────────────────────────────────────
@@ -183,11 +238,10 @@ def run_cycle(executor: SupabaseExecutor, client: anthropic.Anthropic):
     print(f"{'='*60}")
 
     bankroll = executor.get_bankroll()
-    print(f"\nBankroll: ${bankroll:.2f}  "
-          f"(initial: ${executor.get_initial_bankroll():.2f})")
+    print(f"\nBankroll: ${bankroll:.2f}")
 
-    print("\n── Checking open positions ──")
-    executor.simulate_resolutions()
+    print("\n── Settling open positions ──")
+    executor.settle_open_positions()
 
     use_live = os.environ.get("USE_LIVE_MARKETS", "false").strip().lower() == "true"
     print(f"\n── Loading markets ({'live API' if use_live else 'mock file'}) ──")
@@ -221,9 +275,10 @@ def run_cycle(executor: SupabaseExecutor, client: anthropic.Anthropic):
         for opp in tradeable:
             market = next((m for m in markets if m["market_id"] == opp["market_id"]), None)
             if market:
-                opp["current_price"] = market["current_yes_price"]
-                opp["yes_token_id"]  = market.get("yes_token_id")
-                opp["no_token_id"]   = market.get("no_token_id")
+                opp["current_price"]  = market["current_yes_price"]
+                opp["yes_token_id"]   = market.get("yes_token_id")
+                opp["no_token_id"]    = market.get("no_token_id")
+                opp["volume_24h"]     = market.get("volume_24h", 0)
             executor.execute_trade(opp, source="claude")
 
     if skipped:
@@ -247,15 +302,12 @@ def main():
     print(f"  Strategy : {STRATEGY}")
     print(f"  Max bet  : {MAX_BET_PCT:.0%} of bankroll  (25% Kelly)")
     print(f"  Interval : {LOOP_INTERVAL_M} minutes")
+    print(f"  Batches  : 3 parallel Claude calls per cycle")
     print("=" * 60)
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        print(
-            "\nERROR: ANTHROPIC_API_KEY not set.\n"
-            "  Copy .env.example to .env and add your key.\n"
-            "  Get one at: https://console.anthropic.com/\n"
-        )
+        print("\nERROR: ANTHROPIC_API_KEY not set.\n")
         sys.exit(1)
 
     executor = SupabaseExecutor(
@@ -267,7 +319,7 @@ def main():
     client = anthropic.Anthropic(api_key=api_key)
 
     run_once = "--once" in sys.argv
-    cycle = 0
+    cycle    = 0
 
     while True:
         cycle += 1

@@ -97,11 +97,25 @@ def _parse_end_date(raw: str) -> str:
     if not raw:
         return ""
     try:
-        # Handle both "2026-06-30T00:00:00Z" and bare "2026-06-30"
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         return dt.strftime("%Y-%m-%d")
     except ValueError:
-        return str(raw)[:10]  # best-effort slice
+        return str(raw)[:10]
+
+
+def _days_to_expiry(raw_end: str) -> tuple[int | None, str]:
+    """
+    Return (days_remaining, end_datetime_iso).
+    days_remaining is None if the date cannot be parsed.
+    """
+    if not raw_end:
+        return None, ""
+    try:
+        dt = datetime.fromisoformat(str(raw_end).replace("Z", "+00:00"))
+        delta = (dt - datetime.now(timezone.utc)).days
+        return max(delta, 0), dt.isoformat()
+    except (ValueError, TypeError):
+        return None, ""
 
 
 # ── Market mapping ─────────────────────────────────────────────────────────────
@@ -150,10 +164,12 @@ def _map_market(raw: dict) -> Optional[dict]:
     if not market_id:
         return None
 
-    # clobTokenIds is a JSON-encoded array: index 0 = YES token, index 1 = NO token
-    clob_ids    = _parse_json_field(raw.get("clobTokenIds"))
-    yes_token   = str(clob_ids[0]) if len(clob_ids) > 0 else None
-    no_token    = str(clob_ids[1]) if len(clob_ids) > 1 else None
+    clob_ids  = _parse_json_field(raw.get("clobTokenIds"))
+    yes_token = str(clob_ids[0]) if len(clob_ids) > 0 else None
+    no_token  = str(clob_ids[1]) if len(clob_ids) > 1 else None
+
+    days, end_dt_iso = _days_to_expiry(raw.get("endDate"))
+    priority = "HIGH" if days is not None and days <= 7 else "NORMAL"
 
     return {
         "market_id":         market_id,
@@ -163,6 +179,9 @@ def _map_market(raw: dict) -> Optional[dict]:
         "volume_24h":        round(volume_24h, 2),
         "liquidity":         round(liquidity, 2),
         "end_date":          _parse_end_date(str(raw.get("endDate") or "")),
+        "end_datetime":      end_dt_iso,
+        "days_to_expiry":    days,
+        "priority":          priority,
         "description":       str(raw.get("description") or "").strip(),
         "slug":              str(raw.get("slug") or ""),
         "condition_id":      str(raw.get("conditionId") or ""),
@@ -284,6 +303,10 @@ def fetch_live_markets(max_markets: int = MAX_MARKETS) -> list:
 
         if not mapped:
             raise ValueError("No markets survived the quality filter.")
+
+        # Sort by days_to_expiry ascending so near-expiry markets come first.
+        # Markets with no expiry date sort last.
+        mapped.sort(key=lambda m: m.get("days_to_expiry") if m.get("days_to_expiry") is not None else 9999)
 
         _save_cache(mapped)
         return mapped
